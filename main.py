@@ -21,12 +21,17 @@ def extract_metadata_from_opf(opf_path):
         description = root.find('.//dc:description', namespaces)
         subjects = root.findall('.//dc:subject', namespaces)
         
+        # Recherche du numéro ISBN
         isbn = None
         for identifier in identifiers:
-            if 'isbn' in identifier.text.lower() or identifier.get('opf:scheme') == 'ISBN':
-                isbn = identifier.text
+            scheme = identifier.get('{http://www.idpf.org/2007/opf}scheme') 
+            if scheme and scheme.upper() == 'ISBN':
+                isbn = identifier.text.strip()
                 break
         
+        if not isbn:
+            print(f"Aucun ISBN trouvé dans {opf_path}")
+
         return {
             'title': title.text if title is not None else None,
             'author': author.text if author is not None else None,
@@ -35,11 +40,12 @@ def extract_metadata_from_opf(opf_path):
             'isbn': isbn,
             'language': language.text if language is not None else None,
             'description': description.text if description is not None else None,
-            'subjects': [subject.text for subject in subjects]
+            'subjects': [subject.text for subject in subjects if subject.text]
         }
     except ET.ParseError:
         print(f"Erreur de parsing du fichier : {opf_path}")
         return None
+
 
 def parcours_ebook(directory):
     book_count = 0
