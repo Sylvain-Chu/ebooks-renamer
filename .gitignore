@@ -1,2 +1,3 @@
 ebooks
 .env
+.ebooks_metadata.json
