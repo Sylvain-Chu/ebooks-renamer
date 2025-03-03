@@ -1,87 +1,123 @@
 import os
 import json
-import xml.etree.ElementTree as ET
+import subprocess
+import requests
+import re
+from tqdm import tqdm
+from rich.console import Console
+from rich.table import Table
 
-def extract_metadata_from_opf(opf_path):
+GOOGLE_BOOKS_API_URL = "https://www.googleapis.com/books/v1/volumes?q="
+
+console = Console()
+
+def display_stats(total_books, books_found, books_not_found):
+    """Affiche les statistiques finales avec un joli tableau."""
+    table = Table(title="📊 Statistiques de l'extraction", title_style="bold cyan")
+
+    table.add_column("📚 Catégorie", style="bold magenta")
+    table.add_column("📊 Valeur", justify="right", style="bold yellow")
+
+    table.add_row("Nombre total de livres traités", str(total_books))
+    table.add_row("✅ Livres trouvés sur Google Books", str(books_found))
+    table.add_row("❌ Livres sans correspondance", str(books_not_found))
+
+    console.print(table)
+    console.print("✅ Extraction terminée. Résultats enregistrés dans [green]ebooks_not_found.json[/green].")
+
+
+def clean_title(title):
+    """Nettoie le titre en supprimant les indicateurs de tome (T1, T2, etc.) et les parenthèses."""
+    title = re.sub(r'\bT\d+\b', '', title)  # Supprime les T1, T2, etc.
+    title = re.sub(r'\(.*?\)', '', title)  # Supprime tout ce qui est entre parenthèses
+    return title.strip()
+
+
+def get_metadata_from_ebook(epub_path):
+    """Utilise ebook-meta pour extraire le titre, l'auteur et l'ISBN du fichier EPUB."""
+    metadata = {"titre": None, "auteur": None, "isbn": None}
+    
     try:
-        namespaces = {
-            'dc': 'http://purl.org/dc/elements/1.1/',
-            'opf': 'http://www.idpf.org/2007/opf'
-        }
-        
-        tree = ET.parse(opf_path)
-        root = tree.getroot()
-        
-        title = root.find('.//dc:title', namespaces)
-        author = root.find('.//dc:creator', namespaces)
-        date = root.find('.//dc:date', namespaces)
-        publisher = root.find('.//dc:publisher', namespaces)
-        identifiers = root.findall('.//dc:identifier', namespaces)
-        language = root.find('.//dc:language', namespaces)
-        description = root.find('.//dc:description', namespaces)
-        subjects = root.findall('.//dc:subject', namespaces)
-        
-        # Recherche du numéro ISBN
-        isbn = None
-        for identifier in identifiers:
-            scheme = identifier.get('{http://www.idpf.org/2007/opf}scheme') 
-            if scheme and scheme.upper() == 'ISBN':
-                isbn = identifier.text.strip()
-                break
-        
-        if not isbn:
-            print(f"Aucun ISBN trouvé dans {opf_path}")
+        result = subprocess.run(["ebook-meta", epub_path], capture_output=True, text=True, check=True, encoding="utf-8")
+        for line in result.stdout.split("\n"):
+            if line.startswith("Title"):
+                metadata["titre"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Author"):
+                metadata["auteur"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Identifiers"):
+                match = re.search(r'isbn:(\d+)', line) 
+                if match:
+                    metadata["isbn"] = match.group(1)
 
-        return {
-            'title': title.text if title is not None else None,
-            'author': author.text if author is not None else None,
-            'date': date.text if date is not None else None,
-            'publisher': publisher.text if publisher is not None else None,
-            'isbn': isbn,
-            'language': language.text if language is not None else None,
-            'description': description.text if description is not None else None,
-            'subjects': [subject.text for subject in subjects if subject.text]
-        }
-    except ET.ParseError:
-        print(f"Erreur de parsing du fichier : {opf_path}")
-        return None
+    except subprocess.CalledProcessError:
+        console.print(f"❌ Erreur lors de l'extraction des métadonnées pour {epub_path}", style="bold red")
+
+    if metadata["titre"]:
+        metadata["titre"] = clean_title(metadata["titre"])
+    
+    return metadata if metadata["titre"] and metadata["auteur"] else None
 
 
-def parcours_ebook(directory):
-    book_count = 0
-    folder_without_opf = 0
+def search_google_books(query):
+    """Effectue une requête Google Books avec la requête donnée et retourne les résultats."""
+    response = requests.get(GOOGLE_BOOKS_API_URL + query)
+    
+    if response.status_code == 200:
+        data = response.json()
+        if "items" in data and data["items"]:
+            return data["items"][0]["volumeInfo"]
+    return None
+
+
+def verify_with_google_books(metadata):
+    """Cherche le livre sur Google Books en utilisant d'abord l'ISBN (si présent), puis le titre + auteur."""
+    
+    if metadata["isbn"]:
+        result = search_google_books(f"isbn:{metadata['isbn']}")
+        if result:
+            return result 
+
+    query = f"{metadata['titre']}+inauthor:{metadata['auteur']}".replace(" ", "+")
+    return search_google_books(query)
+
+
+def scan_epub_directory(directory):
+    """Parcourt les dossiers et analyse les fichiers EPUB avec une barre de progression."""
     ebooks_metadata = []
+    total_books = 0
+    books_found = 0
+    books_not_found = 0
 
-    for root, dirs, files in os.walk(directory):
-        opf_found = False
-        for file in files:
-            if file.endswith(".opf"):
-                opf_found = True
-                opf_path = os.path.join(root, file)
-                metadata = extract_metadata_from_opf(opf_path)
-                if metadata:
-                    book_count += 1
-                    ebooks_metadata.append(metadata)
-                    print(f"Fichier OPF : {opf_path}")
-                    print(f"Titre : {metadata['title']}")
-                    print(f"Auteur : {metadata['author']}")
-                    print(f"Date : {metadata['date']}")
-                    print(f"Éditeur : {metadata['publisher']}")
-                    print(f"ISBN : {metadata['isbn']}")
-                    print(f"Langue : {metadata['language']}")
-                    print(f"Description : {metadata['description'][:200] if metadata['description'] else 'Aucune description disponible'}...")
-                    print(f"Sujets : {metadata['subjects']}")
-                    print("-" * 50)
-        if not opf_found:
-            folder_without_opf += 1
-    
-    print(f"Total books found: {book_count}")
-    print(f"Folders without OPF file: {folder_without_opf}")
-    
-    with open("ebooks_metadata.json", "w", encoding="utf-8") as json_file:
+    epub_files = [os.path.join(root, file) for root, _, files in os.walk(directory) for file in files if file.lower().endswith(".epub")]
+
+    for epub_path in tqdm(epub_files, desc="📚 Traitement des EPUBs", unit="livre"):
+        metadata = get_metadata_from_ebook(epub_path)
+        if not metadata:
+            continue  
+
+        google_metadata = verify_with_google_books(metadata)
+
+        if google_metadata:
+            books_found += 1
+        else:
+            books_not_found += 1
+            ebooks_metadata.append({
+                "auteur": metadata["auteur"],
+                "titre": metadata["titre"],
+                "isbn": metadata["isbn"],
+                "epub": epub_path
+            })
+
+        total_books += 1
+        if total_books ==10:
+            break
+
+    with open("ebooks_not_found.json", "w", encoding="utf-8") as json_file:
         json.dump(ebooks_metadata, json_file, indent=4, ensure_ascii=False)
 
-if __name__ == "__main__":
-    ebooks_directory = "./ebooks"
-    parcours_ebook(ebooks_directory)
+    display_stats(total_books, books_found, books_not_found)
 
+
+if __name__ == "__main__":
+    directory = "./ebooks" 
+    scan_epub_directory(directory)
